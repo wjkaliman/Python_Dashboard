@@ -1,0 +1,31 @@
+﻿# Python / build
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Local data & personal config
+data/
+config/
+
+# Streamlit caches & secrets
+.streamlit/
+.streamlit/secrets.toml
+
+# Env files
+.env
+*.env
+
+# Logs / OS / editor
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
