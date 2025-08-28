@@ -1,4 +1,7 @@
-﻿# Python Dashboard
+I am currently working on this project. 
+ 
+ 
+ # Python Dashboard
 
 Local Streamlit app with:
 - Weather & 10-day forecast
