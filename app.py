@@ -4,8 +4,8 @@
 # 1) Weather & Time  2) Stocks  3) Reminders  4) Favorites
 #
 # Mentor note:
-# Organized as helpers (top) + UI (bottom). Comments explain what & why,
-# so you can learn as you read.
+# Helpers live at the top, UI at the bottom. Comments explain both the "what"
+# and the "why" so you can learn as you go.
 # ------------------------------------------------------------
 
 import json
@@ -202,45 +202,118 @@ WEATHER_ICON_MAP = {
 
 
 # =========================
-# Stocks (Series-based to avoid MultiIndex)
+# Stocks (robust fetcher + clear notes)
 # =========================
 def fetch_live_price_and_intraday(ticker: str):
     """
-    Return (last_price: float|None, intraday_series: pd.Series|None), name=ticker.
-    Why Series? yfinance can create MultiIndex columns in DataFrames; Series keeps charts simple.
+    Robust fetch for last price + intraday series (Series named by ticker).
+    Strategy:
+      1) Try yfinance download() with (interval, period) pairs in order.
+      2) If empty, try Ticker().history() with same fallbacks.
+      3) If still empty, try fast_info.last_price (price only).
+    Returns:
+      (last_price: float|None, series: pd.Series|None, message: str|None)
     """
-    try:
-        df = yf.download(
-            tickers=ticker,
-            period="1d",
-            interval="1m",
-            progress=False,
-            auto_adjust=False,  # Explicit to avoid FutureWarning and keep raw prices
-        )
-        if df is None or df.empty or "Close" not in df:
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return None, None, "No ticker provided."
+
+    attempts = [
+        ("1m", "1d"),
+        ("5m", "5d"),
+        ("15m", "5d"),
+    ]
+
+    def _extract(df):
+        """Pull a 'Close' series from either a normal or MultiIndex DataFrame."""
+        if df is None or df.empty:
             return None, None
-        close = df["Close"].dropna()
-        if close.empty:
+        close = None
+        if "Close" in df.columns:
+            close = df["Close"].dropna()
+        else:
+            # Try to locate Close in a MultiIndex shape
+            try:
+                # Common pattern: columns like ('Close',) or ('Close','AAPL')
+                # Try a few likely selectors:
+                for key in [("Close",), "Close"]:
+                    if key in df.columns:
+                        tmp = df.loc[:, key].dropna()
+                        if isinstance(tmp, pd.DataFrame) and tmp.shape[1] == 1:
+                            tmp = tmp.iloc[:, 0]
+                        close = tmp
+                        break
+            except Exception:
+                pass
+        if close is None or close.empty:
             return None, None
-        # Future-proof: avoid float(series). Use .item() on the last scalar.
-        last_price = close.iloc[-1].item()
+        last_price = close.iloc[-1]
+        last_price = last_price.item() if hasattr(last_price, "item") else float(last_price)
         return last_price, close.rename(ticker)
-    except Exception:
-        # Friendly failure: return None values instead of crashing the app.
-        return None, None
+
+    errs = []
+
+    # A) Try yf.download
+    for interval, period in attempts:
+        try:
+            df = yf.download(
+                tickers=ticker,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                prepost=True,
+                threads=False,
+            )
+            price, series = _extract(df)
+            if price is not None:
+                return price, series, None
+            errs.append(f"download({interval},{period}) returned empty.")
+        except Exception as e:
+            errs.append(f"download({interval},{period}) error: {e}")
+
+    # B) Try Ticker().history
+    try:
+        tk = yf.Ticker(ticker)
+        for interval, period in attempts:
+            try:
+                df = tk.history(
+                    period=period,
+                    interval=interval,
+                    prepost=True,
+                    auto_adjust=False,
+                )
+                price, series = _extract(df)
+                if price is not None:
+                    return price, series, None
+                errs.append(f"history({interval},{period}) returned empty.")
+            except Exception as e:
+                errs.append(f"history({interval},{period}) error: {e}")
+    except Exception as e:
+        errs.append(f"Ticker init error: {e}")
+
+    # C) Fallback: price-only
+    try:
+        tk = yf.Ticker(ticker)
+        lp = getattr(tk.fast_info, "last_price", None)
+        if lp is not None and not pd.isna(lp):
+            return float(lp), None, "Only last price available (no intraday series)."
+        errs.append("fast_info.last_price unavailable.")
+    except Exception as e:
+        errs.append(f"fast_info error: {e}")
+
+    return None, None, "; ".join(errs) or "No data."
 
 
 # =========================
 # Reminders helpers
 # =========================
 def add_reminder(text: str, due: date):
-    """
-    Store reminders with an explicit UTC timestamp for 'created' to avoid tz surprises.
-    """
+    """Store reminders with a timezone-aware UTC 'created' timestamp."""
     reminders.append({
         "text": text.strip(),
         "due": due.isoformat(),
-        "created": datetime.now(timezone.utc).isoformat()  # explicit, timezone-aware UTC
+        "created": datetime.now(timezone.utc).isoformat()
     })
     save_json(REMINDERS_PATH, reminders)
 
@@ -282,11 +355,11 @@ with st.sidebar:
                      index=0 if settings.get("units", "F") == "F" else 1, horizontal=True)
     settings["units"] = units
 
-    # Optional: edit timezone (defaults to America/Los_Angeles)
+    # Timezone (Pacific default; editable if you travel)
     settings["timezone"] = st.text_input(
         "Timezone (IANA name)",
         value=settings.get("timezone", "America/Los_Angeles"),
-        help="Examples: America/Los_Angeles, America/New_York, Europe/London"
+        help="Examples: America/Los_Angeles, America/New_York, Europe/London",
     )
 
     # Save to disk (so your preference persists across runs)
@@ -424,7 +497,7 @@ with tab1:
                     }).set_index("date")
 
                     st.write(f"**10-Day Forecast for {settings['city']}**")
-                    st.dataframe(df, width="stretch")  # <- modern API (no deprecation)
+                    st.dataframe(df, width="stretch")
                     if not df.empty and {"high", "low"}.issubset(df.columns):
                         st.line_chart(df[["high", "low"]])
                 else:
@@ -439,7 +512,6 @@ with tab1:
 with tab2:
     st.subheader("📈 Stocks")
 
-    # Make the three tickers editable (but fixed count to keep UI clean)
     tickers = settings.get("tickers", ["AAPL", "MSFT", "NVDA"])
     a, b, c = st.columns(3)
     tickers[0] = a.text_input("Ticker 1", tickers[0]).strip().upper()
@@ -451,30 +523,38 @@ with tab2:
         save_json(SETTINGS_PATH, settings)
         st.success("Tickers saved.")
 
-    # Fetch latest prices + 1-minute series; render metrics + chart
     metric_cols = st.columns(3)
     series_list = []
+    notes = []
 
     for i, tk in enumerate(tickers):
         if not tk:
             metric_cols[i].metric("—", "N/A")
+            notes.append(("—", "No ticker provided."))
             continue
-        price, close_series = fetch_live_price_and_intraday(tk)
+
+        price, close_series, msg = fetch_live_price_and_intraday(tk)
         metric_cols[i].metric(tk, f"${price:,.2f}" if price is not None else "N/A")
         if close_series is not None and not close_series.empty:
             series_list.append(close_series)
 
-    # Merge Series side-by-side; avoids MultiIndex column headaches
+        if msg:
+            notes.append((tk, msg))
+
     if series_list:
-        merged = pd.concat(series_list, axis=1)
-        merged = merged.dropna(how="all")
+        merged = pd.concat(series_list, axis=1).dropna(how="all")
         if not merged.empty:
-            st.write("**Intraday (1m) Close**")
+            st.write("**Intraday Close (auto-interval with pre/post)**")
             st.line_chart(merged)
         else:
-            st.caption("No overlapping intraday data to chart right now.")
+            st.caption("Fetched data but no overlapping timestamps to plot.")
     else:
-        st.caption("No intraday data available yet.")
+        st.caption("No intraday series available to plot yet.")
+
+    if notes:
+        with st.expander("Data fetch notes"):
+            for tk, m in notes:
+                st.write(f"- **{tk}**: {m}")
 
 # ---------- TAB 3: Reminders ----------
 with tab3:
@@ -563,5 +643,6 @@ with tab4:
 
 st.write("---")
 st.caption("Built with ❤️ in Streamlit — Pacific time by default. Tweak settings anytime; the app hot-reloads.")
+
 
 
